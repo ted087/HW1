@@ -193,24 +193,36 @@ else:
                             }}
                             .copy-btn:hover {{ background-color: #1a1a1a; border-color: #999; }}
                         </style>
-                        <button class="copy-btn" id="cp_btn">📋</button>
+                        <button class="copy-btn" id="cp_btn" title="複製回覆">📋</button>
                         <script>
                             document.getElementById('cp_btn').onclick = function() {{
                                 const text = "{escaped_text}";
                                 const p = window.parent.document;
                                 const ta = p.createElement("textarea");
                                 ta.value = text; p.body.appendChild(ta); ta.select();
-                                try {{ p.execCommand('copy'); }} catch (err) {{}}
+                                try {{ 
+                                    p.execCommand('copy'); 
+                                    // 點擊後將按鈕變成 ✅，兩秒後變回來
+                                    const btn = document.getElementById('cp_btn');
+                                    btn.innerHTML = '✅';
+                                    setTimeout(() => {{ btn.innerHTML = '📋'; }}, 2000);
+                                }} catch (err) {{}}
                                 p.body.removeChild(ta);
                             }}
                         </script>
                     """, height=38)
 
-                with col2: st.button("👍", key=f"g_{idx}", use_container_width=True)
-                with col3: st.button("👎", key=f"b_{idx}", use_container_width=True)
+                with col2: 
+                    # 增加了 help 屬性與點擊的 st.toast
+                    if st.button("👍", key=f"g_{idx}", help="回應良好", use_container_width=True):
+                        st.toast("✅ 感謝您的好評！")
                 
-                with col4:
-                    if st.button("📤", key=f"share_btn_{idx}", use_container_width=True):
+                with col3: 
+                    if st.button("👎", key=f"b_{idx}", help="回應不佳", use_container_width=True):
+                        st.toast("✅ 收到！我們會持續改進。")
+                
+                with col4: 
+                    if st.button("📤", key=f"share_btn_{idx}", help="生成分享連結", use_container_width=True):
                         share_uuid = uuid.uuid4().hex[:12]
                         shared_data = {
                             "author": st.session_state.username,
@@ -219,12 +231,22 @@ else:
                         }
                         with open(os.path.join(SHARED_DIR, f"{share_uuid}.json"), "w", encoding="utf-8") as f:
                             json.dump(shared_data, f, ensure_ascii=False)
-                        st.session_state.last_share_url = f"http://localhost:8501/?share={share_uuid}"
-                        st.toast("✅ 已生成分享連結！")
+                        
+                        base_url = "http://localhost:8501" 
+                        try:
+                            if hasattr(st, "context"):
+                                host = st.context.headers.get("host")
+                                if host:
+                                    base_url = f"http://{host}"
+                        except:
+                            pass
+                            
+                        st.session_state.last_share_url = f"{base_url}/?share={share_uuid}"
+                        st.toast("✅ 已成功生成分享連結！")
 
                 with col5:
                     if idx == len(chats) - 1:
-                        if st.button("🔄", key=f"r_{idx}", use_container_width=True):
+                        if st.button("🔄", key=f"r_{idx}", help="重新生成", use_container_width=True):
                             st.session_state.regen_flag = True; st.rerun()
 
     # 顯示分享網址
@@ -234,12 +256,12 @@ else:
         if st.button("關閉連結"):
             del st.session_state.last_share_url; st.rerun()
 
-    # --- ✨ AI 邏輯修正 (修復 AI 不回話的 Bug) ---
+    # --- AI 邏輯 ---
     if st.session_state.regen_flag:
         st.session_state.regen_flag = False
         prompt_to_use = chats[-2]["content"]; chats.pop()
     else:
-        prompt_to_use = st.chat_input("詢問...")
+        prompt_to_use = st.chat_input("詢問您的文件或聊天...")
 
     if prompt_to_use:
         # 1. 自動改名邏輯
@@ -248,7 +270,7 @@ else:
             st.session_state.chats[new_n] = st.session_state.chats.pop(st.session_state.current_chat_id)
             st.session_state.current_chat_id = new_n; chats = st.session_state.chats[new_n]
         
-        # 2. 儲存並印出使用者的話 (移除了錯誤的 st.rerun)
+        # 2. 儲存並印出使用者的話
         if not chats or chats[-1]["content"] != prompt_to_use:
             chats.append({"role": "user", "content": prompt_to_use})
             with st.chat_message("user"):
@@ -267,7 +289,7 @@ else:
                     full_res += chunk.choices[0].delta.content; ph.markdown(full_res + "▌")
             ph.markdown(full_res)
             
-            # 4. 存檔對話，最後才重新整理確保畫面穩定
+            # 4. 存檔對話
             chats.append({"role": "assistant", "content": full_res})
             save_user_chats(st.session_state.username, st.session_state.chats)
             st.rerun()
