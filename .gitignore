@@ -1,10 +1,33 @@
-# 忽略 Streamlit 的私密設定檔
+# --- 🛡️ 安全性與私密資訊 (絕對不能上傳) ---
 .streamlit/secrets.toml
+.env
+.env.local
 
-# 忽略 Python 快取
+# --- 💾 本地數據庫與使用者資料 (重要！避免外洩使用者個資) ---
+users.json
+user_chats/
+user_knowledge/
+shared_content/
+
+# --- 🐍 Python 開發環境與快取 ---
 __pycache__/
 *.pyc
-
-# 忽略虛擬環境 (如果你有建的話)
+*.pyo
+*.pyd
+.Python
+env/
 venv/
-.env
+pip-log.txt
+pip-delete-this-directory.txt
+.venv/
+.env/
+
+# --- 💻 作業系統產生的雜物 ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- 🛠️ IDE / 編輯器設定 (選配，建議忽略) ---
+.vscode/
+.idea/
+*.swp
