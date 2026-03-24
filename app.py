@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 # ==========================================
 st.set_page_config(page_title="My Own ChatGPT Pro", layout="centered", page_icon="🚀")
 
-# --- ✨ 強化的 CSS：確保所有內容 100% 絕對置中 ---
+# --- ✨ 強化 CSS：確保所有內容 100% 絕對置中與外觀統一 ---
 st.markdown("""
 <style>
     /* 統一按鈕外觀 */
@@ -32,7 +32,7 @@ st.markdown("""
         background-color: #1a1a1a !important;
         border-color: #999 !important;
     }
-    /* 穿透 Streamlit 的內部標籤，強制內容置中 */
+    /* 穿透 Streamlit 標籤強制內容置中 */
     div[data-testid="stHorizontalBlock"] button div, 
     div[data-testid="stHorizontalBlock"] button p {
         display: flex !important;
@@ -55,7 +55,7 @@ for folder in [CHATS_DIR, KB_DIR, SHARED_DIR]:
     if not os.path.exists(folder): os.makedirs(folder)
 
 # ==========================================
-# 2. 核心邏輯 (多租戶隔離與 RAG)
+# 2. 核心邏輯
 # ==========================================
 def hash_password(password): return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -86,16 +86,13 @@ if "share" in query_params:
     share_id = query_params["share"]
     share_path = os.path.join(SHARED_DIR, f"{share_id}.json")
     if os.path.exists(share_path):
-        with open(share_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(share_path, "r", encoding="utf-8") as f: data = json.load(f)
         st.title("📢 分享的 AI 回應")
         st.info(f"來自用戶 **{data['author']}** 的對話分享")
         with st.chat_message("user"): st.markdown(data["user_query"])
         with st.chat_message("assistant"): st.markdown(data["ai_response"])
         st.divider()
-        if st.button("返回系統"):
-            st.query_params.clear()
-            st.rerun()
+        if st.button("返回系統"): st.query_params.clear(); st.rerun()
         st.stop()
 
 # ==========================================
@@ -125,29 +122,25 @@ if not st.session_state.authenticated:
                 users[nu] = hash_password(np); json.dump(users, open(USER_DATA_FILE, "w"))
                 st.success("註冊成功")
 else:
-    # --- 🤖 主程式 ---
+    # --- 🤖 初始化 AI ---
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
     with st.sidebar:
         st.write(f"👤 用戶: **{st.session_state.username}**")
         if st.button("登出"): st.session_state.authenticated = False; st.rerun()
         
-        st.divider()
-        st.title("📚 個人知識庫")
-        files = st.file_uploader("上傳 PDF (個人隔離)", type="pdf", accept_multiple_files=True)
+        st.divider(); st.title("📚 個人知識庫")
+        files = st.file_uploader("上傳 PDF (隔離保護)", type="pdf", accept_multiple_files=True)
         if st.button("學習文件"):
             if files:
                 with st.spinner("分析中..."):
                     text = get_pdf_text(files)
-                    st.session_state.pdf_context = text
-                    save_user_kb(st.session_state.username, text)
-                    st.success("知識庫已載入並存檔！")
+                    st.session_state.pdf_context = text; save_user_kb(st.session_state.username, text)
+                    st.success("知識庫已載入！")
         
-        if st.session_state.pdf_context:
-            st.caption("✅ 已啟用個人知識庫")
+        if st.session_state.pdf_context: st.caption("✅ 已啟用個人知識庫")
 
-        st.divider()
-        st.title("💬 對話管理")
+        st.divider(); st.title("💬 對話管理")
         if st.button("＋ 新增對話", use_container_width=True):
             nid = f"對話 {len(st.session_state.chats) + 1}"
             st.session_state.chats[nid] = []; st.session_state.current_chat_id = nid; st.rerun()
@@ -155,22 +148,28 @@ else:
         with st.expander("📝 更改對話名稱"):
             new_name = st.text_input("新名稱", value=st.session_state.current_chat_id)
             if st.button("確認修改"):
-                if new_name and new_name != st.session_state.current_chat_id:
-                    old_id = st.session_state.current_chat_id
-                    st.session_state.chats[new_name] = st.session_state.chats.pop(old_id)
-                    st.session_state.current_chat_id = new_name
-                    save_user_chats(st.session_state.username, st.session_state.chats)
-                    st.success("修改成功！")
-                    st.rerun()
+                old_id = st.session_state.current_chat_id
+                st.session_state.chats[new_name] = st.session_state.chats.pop(old_id)
+                st.session_state.current_chat_id = new_name
+                save_user_chats(st.session_state.username, st.session_state.chats); st.rerun()
 
         chat_list = list(st.session_state.chats.keys())
         selected = st.radio("歷史紀錄", chat_list, index=chat_list.index(st.session_state.current_chat_id))
         if selected != st.session_state.current_chat_id:
             st.session_state.current_chat_id = selected; st.rerun()
 
+        # --- ✨ 關鍵加回：模型選取與創造力設定 ---
+        st.divider(); st.title("⚙️ 設定面板")
+        sel_model = st.selectbox(
+            "選擇模型", 
+            ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+            index=0
+        )
+        temp_val = st.slider("創造力 (Temperature)", 0.0, 2.0, 0.7, step=0.1)
+
     st.title(f"🚀 {st.session_state.current_chat_id}")
 
-    # 顯示對話與工具列
+    # --- 顯示內容 ---
     chats = st.session_state.chats[st.session_state.current_chat_id]
     for idx, m in enumerate(chats):
         with st.chat_message(m["role"]):
@@ -180,81 +179,56 @@ else:
                 escaped_text = m["content"].replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace('"', '\\"')
                 col1, col2, col3, col4, col5, _ = st.columns([0.15, 0.12, 0.12, 0.12, 0.12, 0.4])
                 
-                with col1:
+                with col1: # 複製 (含 ✅ 特效)
                     components.html(f"""
                         <style>
-                            body {{ margin: 0; padding: 0; display: flex; align-items: center; justify-content: center; height: 38px; overflow: hidden; }}
-                            .copy-btn {{
-                                background-color: transparent; border: 1px solid #d1d5db;
-                                border-radius: 8px; padding: 4px; cursor: pointer;
-                                font-size: 16px; width: 100%; height: 38px;
-                                display: flex; align-items: center; justify-content: center;
-                                transition: background 0.2s;
-                            }}
-                            .copy-btn:hover {{ background-color: #1a1a1a; border-color: #999; }}
+                            body {{ margin: 0; display: flex; align-items: center; justify-content: center; height: 38px; overflow: hidden; }}
+                            .btn {{ background: transparent; border: 1px solid #d1d5db; border-radius: 8px; cursor: pointer; font-size: 16px; width: 100%; height: 38px; display: flex; align-items: center; justify-content: center; transition: 0.2s; }}
+                            .btn:hover {{ background-color: #1a1a1a; border-color: #999; }}
                         </style>
-                        <button class="copy-btn" id="cp_btn" title="複製回覆">📋</button>
+                        <button class="btn" id="cp_btn" title="複製回覆">📋</button>
                         <script>
                             document.getElementById('cp_btn').onclick = function() {{
-                                const text = "{escaped_text}";
-                                const p = window.parent.document;
-                                const ta = p.createElement("textarea");
-                                ta.value = text; p.body.appendChild(ta); ta.select();
+                                const ta = window.parent.document.createElement("textarea");
+                                ta.value = "{escaped_text}"; window.parent.document.body.appendChild(ta); ta.select();
                                 try {{ 
-                                    p.execCommand('copy'); 
-                                    // 點擊後將按鈕變成 ✅，兩秒後變回來
+                                    window.parent.document.execCommand('copy'); 
                                     const btn = document.getElementById('cp_btn');
                                     btn.innerHTML = '✅';
                                     setTimeout(() => {{ btn.innerHTML = '📋'; }}, 2000);
                                 }} catch (err) {{}}
-                                p.body.removeChild(ta);
+                                window.parent.document.body.removeChild(ta);
                             }}
                         </script>
                     """, height=38)
 
-                with col2: 
-                    # 增加了 help 屬性與點擊的 st.toast
-                    if st.button("👍", key=f"g_{idx}", help="回應良好", use_container_width=True):
-                        st.toast("✅ 感謝您的好評！")
-                
-                with col3: 
-                    if st.button("👎", key=f"b_{idx}", help="回應不佳", use_container_width=True):
-                        st.toast("✅ 收到！我們會持續改進。")
-                
-                with col4: 
+                with col2: # 好評
+                    if st.button("👍", key=f"g_{idx}", help="回應良好", use_container_width=True): st.toast("✅ 感謝您的好評！")
+                with col3: # 負評
+                    if st.button("👎", key=f"b_{idx}", help="回應不佳", use_container_width=True): st.toast("✅ 收到！我們會改進。")
+                with col4: # 分享
                     if st.button("📤", key=f"share_btn_{idx}", help="生成分享連結", use_container_width=True):
                         share_uuid = uuid.uuid4().hex[:12]
-                        shared_data = {
-                            "author": st.session_state.username,
-                            "user_query": chats[idx-1]["content"] if idx > 0 else "無標題",
-                            "ai_response": m["content"]
-                        }
-                        with open(os.path.join(SHARED_DIR, f"{share_uuid}.json"), "w", encoding="utf-8") as f:
-                            json.dump(shared_data, f, ensure_ascii=False)
+                        shared_data = {"author": st.session_state.username, "user_query": chats[idx-1]["content"] if idx > 0 else "無標題", "ai_response": m["content"]}
+                        with open(os.path.join(SHARED_DIR, f"{share_uuid}.json"), "w", encoding="utf-8") as f: json.dump(shared_data, f, ensure_ascii=False)
                         
                         base_url = "http://localhost:8501" 
                         try:
                             if hasattr(st, "context"):
                                 host = st.context.headers.get("host")
-                                if host:
-                                    base_url = f"http://{host}"
-                        except:
-                            pass
-                            
+                                if host: base_url = f"http://{host}"
+                        except: pass
                         st.session_state.last_share_url = f"{base_url}/?share={share_uuid}"
                         st.toast("✅ 已成功生成分享連結！")
 
-                with col5:
+                with col5: # 重新生成
                     if idx == len(chats) - 1:
                         if st.button("🔄", key=f"r_{idx}", help="重新生成", use_container_width=True):
                             st.session_state.regen_flag = True; st.rerun()
 
-    # 顯示分享網址
     if "last_share_url" in st.session_state:
-        st.success("🔗 你的分享連結：")
-        st.code(st.session_state.last_share_url)
-        if st.button("關閉連結"):
-            del st.session_state.last_share_url; st.rerun()
+        st.success("🔗 你的分享連結："); st.code(st.session_state.last_share_url)
+        if st.button("關閉連結"): del st.session_state.last_share_url; st.rerun()
 
     # --- AI 邏輯 ---
     if st.session_state.regen_flag:
@@ -264,32 +238,30 @@ else:
         prompt_to_use = st.chat_input("詢問您的文件或聊天...")
 
     if prompt_to_use:
-        # 1. 自動改名邏輯
         if len(chats) == 0:
             new_n = prompt_to_use[:10] + ("..." if len(prompt_to_use) > 10 else "")
             st.session_state.chats[new_n] = st.session_state.chats.pop(st.session_state.current_chat_id)
             st.session_state.current_chat_id = new_n; chats = st.session_state.chats[new_n]
         
-        # 2. 儲存並印出使用者的話
         if not chats or chats[-1]["content"] != prompt_to_use:
             chats.append({"role": "user", "content": prompt_to_use})
-            with st.chat_message("user"):
-                st.markdown(prompt_to_use)
+            with st.chat_message("user"): st.markdown(prompt_to_use)
 
-        # 3. 呼叫 AI 並顯示回覆
         with st.chat_message("assistant"):
             sys_msg = "你是一位專業助手。請使用繁體中文。若有公式請用 LaTeX。"
             if st.session_state.pdf_context: 
                 sys_msg += f"\n\n參考資料 (僅限此用戶): \n{st.session_state.pdf_context[:4000]}"
                 
-            res = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role":"system","content":sys_msg}]+chats, stream=True)
+            res = client.chat.completions.create(
+                model=sel_model,         # 使用設定的模型
+                temperature=temp_val,    # 使用設定的溫度
+                messages=[{"role":"system","content":sys_msg}] + chats, 
+                stream=True
+            )
             full_res, ph = "", st.empty()
             for chunk in res:
                 if chunk.choices[0].delta.content:
                     full_res += chunk.choices[0].delta.content; ph.markdown(full_res + "▌")
             ph.markdown(full_res)
-            
-            # 4. 存檔對話
             chats.append({"role": "assistant", "content": full_res})
-            save_user_chats(st.session_state.username, st.session_state.chats)
-            st.rerun()
+            save_user_chats(st.session_state.username, st.session_state.chats); st.rerun()
