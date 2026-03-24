@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 # ==========================================
 st.set_page_config(page_title="My Own ChatGPT Pro", layout="centered", page_icon="🚀")
 
-# --- ✨ 強化的 CSS：確保所有內容 100% 絕對置中與外觀統一 ---
+# --- ✨ 強化 CSS：確保所有內容 100% 絕對置中與外觀統一 ---
 st.markdown("""
 <style>
     /* 統一按鈕外觀 */
@@ -96,7 +96,7 @@ if "share" in query_params:
         st.stop()
 
 # ==========================================
-# 4. 身份驗證
+# 4. 身份驗證與對話管理
 # ==========================================
 if "authenticated" not in st.session_state: st.session_state.authenticated = False
 if "regen_flag" not in st.session_state: st.session_state.regen_flag = False
@@ -141,10 +141,28 @@ else:
         if st.session_state.pdf_context: st.caption("✅ 已啟用個人知識庫")
 
         st.divider(); st.title("💬 對話管理")
+        
+        # 新增對話按鈕
         if st.button("＋ 新增對話", use_container_width=True):
             nid = f"對話 {len(st.session_state.chats) + 1}"
             st.session_state.chats[nid] = []; st.session_state.current_chat_id = nid; st.rerun()
         
+        # ✨ 新增：刪除對話功能 ✨
+        if st.button("🗑️ 刪除目前對話", use_container_width=True):
+            if len(st.session_state.chats) > 1:
+                target_id = st.session_state.current_chat_id
+                del st.session_state.chats[target_id]
+                st.session_state.current_chat_id = list(st.session_state.chats.keys())[0]
+                save_user_chats(st.session_state.username, st.session_state.chats)
+                st.toast(f"✅ 已刪除對話：{target_id}")
+                st.rerun()
+            else:
+                # 只有一個對話時，清空內容而非刪除 key
+                st.session_state.chats[st.session_state.current_chat_id] = []
+                save_user_chats(st.session_state.username, st.session_state.chats)
+                st.toast("✅ 已清空目前對話 (至少需保留一個對話視窗)")
+                st.rerun()
+
         with st.expander("📝 更改對話名稱"):
             new_name = st.text_input("新名稱", value=st.session_state.current_chat_id)
             if st.button("確認修改"):
@@ -160,28 +178,13 @@ else:
 
         # --- ⚙️ 設定面板 (含自訂 System Prompt) ---
         st.divider(); st.title("⚙️ 設定面板")
-        
-        # 1. 挑選模型
-        sel_model = st.selectbox(
-            "選擇模型", 
-            ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
-            index=0
-        )
-        
-        # 2. 自訂 System Prompt
-        custom_sys = st.text_area(
-            "自訂 System Prompt", 
-            value="你是一位專業助手。請使用繁體中文。若有公式請用 LaTeX。",
-            height=100,
-            help="在這裡輸入你希望 AI 遵循的角色設定或規則。"
-        )
-        
-        # 3. 自訂 API 參數
+        sel_model = st.selectbox("選擇模型", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"], index=0)
+        custom_sys = st.text_area("自訂 System Prompt", value="你是一位專業助手。請使用繁體中文。若有公式請用 LaTeX。", height=100)
         temp_val = st.slider("創造力 (Temperature)", 0.0, 2.0, 0.7, step=0.1)
 
     st.title(f"🚀 {st.session_state.current_chat_id}")
 
-    # --- 顯示內容 ---
+    # --- 顯示對話內容 ---
     chats = st.session_state.chats[st.session_state.current_chat_id]
     for idx, m in enumerate(chats):
         with st.chat_message(m["role"]):
@@ -214,11 +217,11 @@ else:
                         </script>
                     """, height=38)
 
-                with col2: # 好評
+                with col2: # 好評回饋
                     if st.button("👍", key=f"g_{idx}", help="回應良好", use_container_width=True): st.toast("✅ 感謝您的好評！")
-                with col3: # 負評
+                with col3: # 負評回饋
                     if st.button("👎", key=f"b_{idx}", help="回應不佳", use_container_width=True): st.toast("✅ 收到！我們會改進。")
-                with col4: # 分享
+                with col4: # 分享功能
                     if st.button("📤", key=f"share_btn_{idx}", help="生成分享連結", use_container_width=True):
                         share_uuid = uuid.uuid4().hex[:12]
                         shared_data = {"author": st.session_state.username, "user_query": chats[idx-1]["content"] if idx > 0 else "無標題", "ai_response": m["content"]}
@@ -233,7 +236,7 @@ else:
                         st.session_state.last_share_url = f"{base_url}/?share={share_uuid}"
                         st.toast("✅ 已成功生成分享連結！")
 
-                with col5: # 重新生成
+                with col5: # 重新生成按鈕
                     if idx == len(chats) - 1:
                         if st.button("🔄", key=f"r_{idx}", help="重新生成", use_container_width=True):
                             st.session_state.regen_flag = True; st.rerun()
@@ -242,7 +245,7 @@ else:
         st.success("🔗 你的分享連結："); st.code(st.session_state.last_share_url)
         if st.button("關閉連結"): del st.session_state.last_share_url; st.rerun()
 
-    # --- AI 邏輯 ---
+    # --- AI 輸入邏輯 ---
     if st.session_state.regen_flag:
         st.session_state.regen_flag = False
         prompt_to_use = chats[-2]["content"]; chats.pop()
@@ -260,14 +263,13 @@ else:
             with st.chat_message("user"): st.markdown(prompt_to_use)
 
         with st.chat_message("assistant"):
-            # ✨ 整合自訂指令與 PDF 內容
             sys_msg = custom_sys
             if st.session_state.pdf_context: 
                 sys_msg += f"\n\n參考資料 (僅限此用戶): \n{st.session_state.pdf_context[:4000]}"
                 
             res = client.chat.completions.create(
-                model=sel_model,         # 使用設定的模型
-                temperature=temp_val,    # 使用設定的溫度
+                model=sel_model,
+                temperature=temp_val,
                 messages=[{"role":"system","content":sys_msg}] + chats, 
                 stream=True
             )
