@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 # ==========================================
 st.set_page_config(page_title="My Own ChatGPT Pro", layout="centered", page_icon="🚀")
 
-# --- ✨ 強化 CSS：確保所有內容 100% 絕對置中與外觀統一 ---
+# --- ✨ 強化的 CSS：確保所有內容 100% 絕對置中與外觀統一 ---
 st.markdown("""
 <style>
     /* 統一按鈕外觀 */
@@ -158,13 +158,25 @@ else:
         if selected != st.session_state.current_chat_id:
             st.session_state.current_chat_id = selected; st.rerun()
 
-        # --- ✨ 關鍵加回：模型選取與創造力設定 ---
+        # --- ⚙️ 設定面板 (含自訂 System Prompt) ---
         st.divider(); st.title("⚙️ 設定面板")
+        
+        # 1. 挑選模型
         sel_model = st.selectbox(
             "選擇模型", 
             ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
             index=0
         )
+        
+        # 2. 自訂 System Prompt
+        custom_sys = st.text_area(
+            "自訂 System Prompt", 
+            value="你是一位專業助手。請使用繁體中文。若有公式請用 LaTeX。",
+            height=100,
+            help="在這裡輸入你希望 AI 遵循的角色設定或規則。"
+        )
+        
+        # 3. 自訂 API 參數
         temp_val = st.slider("創造力 (Temperature)", 0.0, 2.0, 0.7, step=0.1)
 
     st.title(f"🚀 {st.session_state.current_chat_id}")
@@ -248,7 +260,8 @@ else:
             with st.chat_message("user"): st.markdown(prompt_to_use)
 
         with st.chat_message("assistant"):
-            sys_msg = "你是一位專業助手。請使用繁體中文。若有公式請用 LaTeX。"
+            # ✨ 整合自訂指令與 PDF 內容
+            sys_msg = custom_sys
             if st.session_state.pdf_context: 
                 sys_msg += f"\n\n參考資料 (僅限此用戶): \n{st.session_state.pdf_context[:4000]}"
                 
