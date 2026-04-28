@@ -1,0 +1,8 @@
+streamlit
+groq
+pypdf
+pillow
+opencv-python
+streamlit-oauth
+requests
+cryptography

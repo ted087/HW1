@@ -14,6 +14,12 @@ import time
 from io import BytesIO
 from PIL import Image
 
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except Exception:
+    Fernet = None
+    InvalidToken = Exception
+
 # Google OAuth login. Install with: pip install streamlit-oauth requests
 try:
     from streamlit_oauth import OAuth2Component
@@ -73,8 +79,9 @@ CHATS_DIR = "user_chats"
 KB_DIR = "user_knowledge"
 SHARED_DIR = "shared_content"
 MEMORY_DIR = "user_memory"
+USER_SECRETS_DIR = "user_secrets"
 
-for folder in [CHATS_DIR, KB_DIR, SHARED_DIR, MEMORY_DIR]:
+for folder in [CHATS_DIR, KB_DIR, SHARED_DIR, MEMORY_DIR, USER_SECRETS_DIR]:
     if not os.path.exists(folder):
         os.makedirs(folder)
 
@@ -102,6 +109,153 @@ def load_google_users():
 def save_google_users(users):
     with open(GOOGLE_USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, ensure_ascii=False, indent=4)
+
+
+# ==========================================
+# 使用者 API Key 加密儲存輔助函式
+# ==========================================
+def get_app_encryption_key():
+    """從 Streamlit secrets 讀取 Fernet 加密金鑰。請勿放到 GitHub。"""
+    if Fernet is None:
+        raise RuntimeError("尚未安裝 cryptography。請執行：pip install cryptography")
+
+    try:
+        key = st.secrets.get("APP_ENCRYPTION_KEY", "")
+    except Exception:
+        key = ""
+
+    key = str(key).strip()
+    if not key:
+        raise RuntimeError(
+            "缺少 APP_ENCRYPTION_KEY。請先在 .streamlit/secrets.toml 加入加密金鑰。"
+        )
+
+    try:
+        Fernet(key.encode("utf-8"))
+    except Exception:
+        raise RuntimeError(
+            "APP_ENCRYPTION_KEY 格式錯誤。請用 Fernet.generate_key() 產生。"
+        )
+
+    return key.encode("utf-8")
+
+
+def encrypt_text(plain_text):
+    fernet = Fernet(get_app_encryption_key())
+    return fernet.encrypt(plain_text.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_text(encrypted_text):
+    fernet = Fernet(get_app_encryption_key())
+    return fernet.decrypt(encrypted_text.encode("utf-8")).decode("utf-8")
+
+
+def get_user_secret_path(username):
+    safe_username = sanitize_user_id(username)
+    return os.path.join(USER_SECRETS_DIR, f"secrets_{safe_username}.json")
+
+
+def load_user_api_key(username):
+    """讀取並解密目前使用者自己的 Groq API Key。"""
+    path = get_user_secret_path(username)
+    if not os.path.exists(path):
+        return ""
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        encrypted_key = data.get("groq_api_key", "")
+        if not encrypted_key:
+            return ""
+        return decrypt_text(encrypted_key)
+    except InvalidToken:
+        st.error("API Key 解密失敗：APP_ENCRYPTION_KEY 可能已更換。請刪除舊 Key 後重新輸入。")
+        return ""
+    except Exception as e:
+        st.error(f"讀取 API Key 失敗：{e}")
+        return ""
+
+
+def save_user_api_key(username, api_key):
+    """將目前使用者自己的 Groq API Key 加密後儲存。"""
+    api_key = (api_key or "").strip()
+    if not api_key:
+        raise ValueError("API Key 不可為空。")
+
+    data = {
+        "provider": "groq",
+        "groq_api_key": encrypt_text(api_key),
+        "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+    with open(get_user_secret_path(username), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+
+def delete_user_api_key(username):
+    path = get_user_secret_path(username)
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def mask_api_key(api_key):
+    api_key = api_key or ""
+    if len(api_key) <= 10:
+        return "已儲存 API Key"
+    return f"{api_key[:6]}...{api_key[-4:]}"
+
+
+def render_api_key_panel(username):
+    """在側邊欄顯示 API Key 輸入 / 儲存 / 刪除區塊，並回傳解密後的 Groq API Key。"""
+    st.divider()
+    st.title("🔐 API Key")
+
+    try:
+        stored_key = load_user_api_key(username)
+    except Exception as e:
+        stored_key = ""
+        st.error(str(e))
+        st.code("""# 產生 APP_ENCRYPTION_KEY
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# .streamlit/secrets.toml
+APP_ENCRYPTION_KEY = "貼上剛剛產生的金鑰"
+""")
+
+    if stored_key:
+        st.success(f"已加密儲存 Groq API Key：{mask_api_key(stored_key)}")
+    else:
+        st.warning("尚未設定 Groq API Key。請輸入自己的 API Key 才能開始聊天。")
+
+    with st.expander("設定 / 更換 Groq API Key", expanded=not bool(stored_key)):
+        new_key = st.text_input(
+            "Groq API Key",
+            type="password",
+            placeholder="gsk_...",
+            help="你的 API Key 會用 APP_ENCRYPTION_KEY 加密後，儲存在本機 user_secrets 資料夾。"
+        )
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("💾 加密儲存", use_container_width=True):
+                try:
+                    save_user_api_key(username, new_key)
+                    st.session_state.user_groq_api_key = new_key.strip()
+                    st.success("API Key 已加密儲存！")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"儲存失敗：{e}")
+
+        with col_b:
+            if st.button("🧹 刪除 Key", use_container_width=True):
+                delete_user_api_key(username)
+                if "user_groq_api_key" in st.session_state:
+                    del st.session_state.user_groq_api_key
+                st.warning("已刪除儲存的 API Key。")
+                st.rerun()
+
+    # 優先用 session 裡剛儲存的 key，否則用檔案中解密出的 key。
+    return st.session_state.get("user_groq_api_key") or stored_key
 
 
 def upsert_google_user(user_info):
@@ -216,7 +370,7 @@ def clear_login_session():
         "authenticated", "login_provider", "oauth_token", "google_user",
         "username", "user_email", "user_name", "user_picture",
         "chats", "pdf_context", "memory", "current_chat_id",
-        "media_cache", "regen_flag", "last_share_url"
+        "media_cache", "regen_flag", "last_share_url", "user_groq_api_key"
     ]
     for key in keys:
         if key in st.session_state:
@@ -909,8 +1063,6 @@ if "regen_flag" not in st.session_state:
 if not st.session_state.authenticated:
     render_google_login_page()
 else:
-    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-
     with st.sidebar:
         st.title("👤 使用者")
         if st.session_state.get("user_picture"):
@@ -921,6 +1073,8 @@ else:
         if st.button("登出 Google", use_container_width=True):
             clear_login_session()
             st.rerun()
+
+        user_groq_api_key = render_api_key_panel(st.session_state.username)
 
         st.divider()
         st.title("📚 個人知識庫")
