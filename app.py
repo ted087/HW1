@@ -181,6 +181,8 @@ else:
         sel_model = st.selectbox("選擇模型", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"], index=0)
         custom_sys = st.text_area("自訂 System Prompt", value="你是一位專業助手。請使用繁體中文。若有公式請用 LaTeX。", height=100)
         temp_val = st.slider("創造力 (Temperature)", 0.0, 2.0, 0.7, step=0.1)
+        top_p = st.slider("Top-p（回答多樣性）", 0.0, 1.0, 1.0, step=0.05)
+        max_tokens = st.slider("最大回覆長度", 256, 4096, 1024, step=256)
 
     st.title(f"🚀 {st.session_state.current_chat_id}")
 
@@ -270,6 +272,8 @@ else:
             res = client.chat.completions.create(
                 model=sel_model,
                 temperature=temp_val,
+                top_p=top_p,
+                max_tokens=max_tokens,
                 messages=[{"role":"system","content":sys_msg}] + chats, 
                 stream=True
             )
