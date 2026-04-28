@@ -10,8 +10,20 @@ import base64
 import datetime
 import re
 import tempfile
+import time
 from io import BytesIO
 from PIL import Image
+
+# Google OAuth login. Install with: pip install streamlit-oauth requests
+try:
+    from streamlit_oauth import OAuth2Component
+except Exception:
+    OAuth2Component = None
+
+try:
+    import requests
+except Exception:
+    requests = None
 
 # Optional: video frame extraction. Install with: pip install opencv-python
 try:
@@ -55,7 +67,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-USER_DATA_FILE = "users.json"
+USER_DATA_FILE = "users.json"  # 舊版帳密登入用；Google OAuth 版本不再使用。
+GOOGLE_USERS_FILE = "google_users.json"
 CHATS_DIR = "user_chats"
 KB_DIR = "user_knowledge"
 SHARED_DIR = "shared_content"
@@ -64,6 +77,201 @@ MEMORY_DIR = "user_memory"
 for folder in [CHATS_DIR, KB_DIR, SHARED_DIR, MEMORY_DIR]:
     if not os.path.exists(folder):
         os.makedirs(folder)
+
+
+# ==========================================
+# Google OAuth 登入輔助函式
+# ==========================================
+def sanitize_user_id(email):
+    """把 Google Email 轉成安全的檔名 ID，避免特殊字元造成路徑問題。"""
+    email = (email or "").strip().lower()
+    safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", email)
+    return safe or "unknown_user"
+
+
+def load_google_users():
+    if os.path.exists(GOOGLE_USERS_FILE):
+        try:
+            with open(GOOGLE_USERS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_google_users(users):
+    with open(GOOGLE_USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(users, f, ensure_ascii=False, indent=4)
+
+
+def upsert_google_user(user_info):
+    """首次 Google 登入時自動建立使用者資料；之後更新最後登入時間與頭像。"""
+    email = user_info.get("email", "").strip().lower()
+    user_id = sanitize_user_id(email)
+    users = load_google_users()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if user_id not in users:
+        users[user_id] = {
+            "email": email,
+            "name": user_info.get("name") or email,
+            "picture": user_info.get("picture", ""),
+            "created_at": now,
+            "last_login": now,
+            "login_provider": "google"
+        }
+    else:
+        users[user_id].update({
+            "email": email,
+            "name": user_info.get("name") or users[user_id].get("name") or email,
+            "picture": user_info.get("picture") or users[user_id].get("picture", ""),
+            "last_login": now,
+            "login_provider": "google"
+        })
+
+    save_google_users(users)
+    return user_id, users[user_id]
+
+
+def get_app_base_url():
+    """取得 OAuth redirect URI。部署時可在 secrets.toml 設定 APP_BASE_URL。"""
+    try:
+        if "APP_BASE_URL" in st.secrets and st.secrets["APP_BASE_URL"]:
+            return str(st.secrets["APP_BASE_URL"]).rstrip("/")
+    except Exception:
+        pass
+
+    try:
+        if hasattr(st, "context"):
+            host = st.context.headers.get("host")
+            proto = st.context.headers.get("x-forwarded-proto", "http")
+            if host:
+                return f"{proto}://{host}".rstrip("/")
+    except Exception:
+        pass
+
+    return "http://localhost:8501"
+
+
+def get_google_oauth_component():
+    if OAuth2Component is None:
+        return None
+
+    return OAuth2Component(
+        client_id=st.secrets["GOOGLE_CLIENT_ID"],
+        client_secret=st.secrets["GOOGLE_CLIENT_SECRET"],
+        authorize_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
+        token_endpoint="https://oauth2.googleapis.com/token",
+        refresh_token_endpoint="https://oauth2.googleapis.com/token",
+        revoke_token_endpoint="https://oauth2.googleapis.com/revoke",
+    )
+
+
+def get_google_user_info(token):
+    """用 access_token 取得 Google 使用者基本資料。"""
+    if requests is None:
+        raise RuntimeError("尚未安裝 requests，請執行：pip install requests")
+
+    access_token = None
+    if isinstance(token, dict):
+        access_token = token.get("access_token")
+    if not access_token:
+        raise RuntimeError("Google OAuth token 中找不到 access_token。")
+
+    res = requests.get(
+        "https://www.googleapis.com/oauth2/v3/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=10,
+    )
+    res.raise_for_status()
+    return res.json()
+
+
+def complete_google_login(user_info, token=None):
+    """完成登入流程：建立使用者、載入聊天/知識庫/記憶。"""
+    email = user_info.get("email", "").strip().lower()
+    if not email:
+        st.error("Google 沒有回傳 Email，無法登入。")
+        st.stop()
+
+    user_id, profile = upsert_google_user(user_info)
+
+    st.session_state.authenticated = True
+    st.session_state.login_provider = "google"
+    st.session_state.oauth_token = token
+    st.session_state.google_user = user_info
+    st.session_state.username = user_id              # 內部安全檔名 ID
+    st.session_state.user_email = email              # 顯示用 Email
+    st.session_state.user_name = profile.get("name") or email
+    st.session_state.user_picture = profile.get("picture", "")
+
+    load_user_data(user_id)
+    st.session_state.memory = load_user_memory(user_id)
+    st.session_state.current_chat_id = list(st.session_state.chats.keys())[0]
+
+
+def clear_login_session():
+    """登出：清掉本機 session，不刪除使用者資料。"""
+    keys = [
+        "authenticated", "login_provider", "oauth_token", "google_user",
+        "username", "user_email", "user_name", "user_picture",
+        "chats", "pdf_context", "memory", "current_chat_id",
+        "media_cache", "regen_flag", "last_share_url"
+    ]
+    for key in keys:
+        if key in st.session_state:
+            del st.session_state[key]
+    st.session_state.authenticated = False
+
+
+def render_google_login_page():
+    st.title("🛡️ 個人 AI 助手")
+    st.subheader("使用 Google 帳號登入")
+    st.caption("登入後系統會自動建立使用者資料，並用你的 Google Email 區分聊天紀錄、知識庫與長期記憶。")
+
+    if OAuth2Component is None:
+        st.error("尚未安裝 streamlit-oauth。請先執行：pip install streamlit-oauth requests")
+        st.stop()
+
+    missing = []
+    for key in ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]:
+        try:
+            if key not in st.secrets or not st.secrets[key]:
+                missing.append(key)
+        except Exception:
+            missing.append(key)
+
+    if missing:
+        st.error("缺少 Google OAuth 設定：" + ", ".join(missing))
+        st.code("""# .streamlit/secrets.toml
+GOOGLE_CLIENT_ID = "你的 Google OAuth Client ID"
+GOOGLE_CLIENT_SECRET = "你的 Google OAuth Client Secret"
+APP_BASE_URL = "http://localhost:8501"
+""")
+        st.stop()
+
+    oauth2 = get_google_oauth_component()
+    redirect_uri = get_app_base_url()
+
+    result = oauth2.authorize_button(
+        name="使用 Google 登入",
+        icon="https://www.google.com/favicon.ico",
+        redirect_uri=redirect_uri,
+        scope="openid email profile",
+        key="google_login",
+    )
+
+    st.info(f"Google Cloud Console 的 Authorized redirect URI 請設定為：{redirect_uri}")
+
+    if result and "token" in result:
+        try:
+            token = result["token"]
+            user_info = get_google_user_info(token)
+            complete_google_login(user_info, token=token)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Google 登入失敗：{e}")
+
 
 # ==========================================
 # 2. 核心邏輯
@@ -465,17 +673,208 @@ def word_count_tool(text):
     return f"中文字數：{chinese_chars}，英文單字數：{english_words}，數字數量：{numbers}"
 
 
+# ==========================================
+# MCP-style 工具層與自動工具呼叫
+# ==========================================
+# 這裡把原本 /calc、/time、/count 升級成「工具清單 + tools/list + tools/call」。
+# LLM 可以先判斷是否要使用工具，再透過這個 MCP-style JSON-RPC 層呼叫工具。
+
+LOCAL_TOOL_SCHEMAS = [
+    {
+        "name": "calculator",
+        "description": "計算基本數學算式，例如 12*(3+4)。只支援安全的四則運算字元。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": "要計算的數學算式，例如 1+2*3"
+                }
+            },
+            "required": ["expression"]
+        }
+    },
+    {
+        "name": "current_time",
+        "description": "取得目前系統時間。",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "word_count",
+        "description": "計算文字中的中文字數、英文單字數與數字數量。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "要統計的文字內容"
+                }
+            },
+            "required": ["text"]
+        }
+    }
+]
+
+
+def mcp_tools_list():
+    """MCP-style tools/list：回傳目前可用工具清單。"""
+    return {
+        "tools": LOCAL_TOOL_SCHEMAS
+    }
+
+
+def mcp_tools_call(name, arguments=None):
+    """MCP-style tools/call：根據工具名稱與 arguments 呼叫本地工具。"""
+    arguments = arguments or {}
+
+    if name == "calculator":
+        expression = str(arguments.get("expression", "")).strip()
+        if not expression:
+            return {"is_error": True, "content": "calculator 需要 expression 參數。"}
+        return {"is_error": False, "content": calculator_tool(expression)}
+
+    if name == "current_time":
+        return {"is_error": False, "content": time_tool()}
+
+    if name == "word_count":
+        text = str(arguments.get("text", ""))
+        if not text:
+            return {"is_error": True, "content": "word_count 需要 text 參數。"}
+        return {"is_error": False, "content": word_count_tool(text)}
+
+    return {"is_error": True, "content": f"未知工具：{name}"}
+
+
+def mcp_handle_jsonrpc(request):
+    """簡化版 MCP JSON-RPC handler，支援 tools/list 與 tools/call。"""
+    try:
+        method = request.get("method")
+        request_id = request.get("id")
+        params = request.get("params", {}) or {}
+
+        if method == "tools/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": mcp_tools_list()
+            }
+
+        if method == "tools/call":
+            result = mcp_tools_call(
+                name=params.get("name"),
+                arguments=params.get("arguments", {})
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": result
+            }
+
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": -32601,
+                "message": f"Method not found: {method}"
+            }
+        }
+    except Exception as e:
+        return {
+            "jsonrpc": "2.0",
+            "id": request.get("id") if isinstance(request, dict) else None,
+            "error": {
+                "code": -32603,
+                "message": str(e)
+            }
+        }
+
+
+def tools_prompt_text():
+    return json.dumps(mcp_tools_list(), ensure_ascii=False, indent=2)
+
+
+def auto_select_mcp_tool(client, prompt):
+    """
+    讓 LLM 自動判斷是否需要工具。
+    若需要，回傳 {use_tool, tool_name, arguments, reason}；否則 use_tool=False。
+    """
+    selector_prompt = f"""
+你是一個工具路由器。請判斷使用者問題是否需要呼叫工具。
+
+可用工具如下：
+{tools_prompt_text()}
+
+判斷規則：
+- 只有在使用者明確需要計算、目前時間、文字統計時才使用工具。
+- 一般聊天、翻譯、寫作、程式解釋、文件分析，不要使用工具。
+- 請只輸出 JSON，不要輸出其他文字。
+
+輸出格式：
+{{
+  "use_tool": true 或 false,
+  "tool_name": "calculator/current_time/word_count 其中之一，若不用工具則空字串",
+  "arguments": {{"expression": "..." 或 "text": "..."}},
+  "reason": "簡短原因"
+}}
+
+使用者問題：
+{prompt}
+"""
+    try:
+        res = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": selector_prompt}],
+            temperature=0,
+            max_tokens=300
+        )
+        data = safe_json_loads(res.choices[0].message.content or "")
+        if not isinstance(data, dict):
+            return {"use_tool": False, "tool_name": "", "arguments": {}, "reason": "工具路由輸出無法解析"}
+        return data
+    except Exception:
+        return {"use_tool": False, "tool_name": "", "arguments": {}, "reason": "工具路由失敗"}
+
+
 def run_local_tool(prompt):
+    """保留手動 slash command，同時底層改用 MCP-style tools/call。"""
     text = prompt.strip()
     if text.startswith("/calc"):
         expression = text.replace("/calc", "", 1).strip()
-        return calculator_tool(expression)
+        result = mcp_tools_call("calculator", {"expression": expression})
+        return result["content"]
     if text.startswith("/time"):
-        return time_tool()
+        result = mcp_tools_call("current_time", {})
+        return result["content"]
     if text.startswith("/count"):
         content = text.replace("/count", "", 1).strip()
-        return word_count_tool(content)
+        result = mcp_tools_call("word_count", {"text": content})
+        return result["content"]
     return None
+
+
+def auto_run_mcp_tool_if_needed(client, prompt):
+    """由 LLM 自動選工具，並透過 MCP-style tools/call 執行。"""
+    decision = auto_select_mcp_tool(client, prompt)
+    if not decision.get("use_tool"):
+        return None
+
+    tool_name = decision.get("tool_name", "")
+    arguments = decision.get("arguments", {}) or {}
+    result = mcp_tools_call(tool_name, arguments)
+
+    if result.get("is_error"):
+        return f"🧰 MCP 工具呼叫失敗：\n\n工具：{tool_name}\n原因：{result.get('content')}"
+
+    return (
+        "🧰 MCP 工具自動呼叫結果：\n\n"
+        f"工具：{tool_name}\n\n"
+        f"參數：{json.dumps(arguments, ensure_ascii=False)}\n\n"
+        f"結果：{result.get('content')}"
+    )
 
 # ==========================================
 # 3. 分享功能路由
@@ -508,40 +907,19 @@ if "regen_flag" not in st.session_state:
     st.session_state.regen_flag = False
 
 if not st.session_state.authenticated:
-    st.title("🛡️ 個人 AI 助手")
-    t1, t2 = st.tabs(["登入", "註冊"])
-    with t1:
-        u = st.text_input("帳號", key="l_u")
-        p = st.text_input("密碼", type="password", key="l_p")
-        if st.button("進入系統"):
-            users = json.load(open(USER_DATA_FILE)) if os.path.exists(USER_DATA_FILE) else {}
-            if u in users and users[u] == hash_password(p):
-                st.session_state.authenticated = True
-                st.session_state.username = u
-                load_user_data(u)
-                st.session_state.memory = load_user_memory(u)
-                st.session_state.current_chat_id = list(st.session_state.chats.keys())[0]
-                st.rerun()
-            else:
-                st.error("帳號或密碼錯誤")
-    with t2:
-        nu = st.text_input("新帳號", key="n_u")
-        np = st.text_input("新密碼", type="password", key="n_p")
-        if st.button("建立空間"):
-            users = json.load(open(USER_DATA_FILE)) if os.path.exists(USER_DATA_FILE) else {}
-            if nu in users:
-                st.error("帳號已存在")
-            else:
-                users[nu] = hash_password(np)
-                json.dump(users, open(USER_DATA_FILE, "w"))
-                st.success("註冊成功")
+    render_google_login_page()
 else:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
     with st.sidebar:
-        st.write(f"👤 用戶: **{st.session_state.username}**")
-        if st.button("登出"):
-            st.session_state.authenticated = False
+        st.title("👤 使用者")
+        if st.session_state.get("user_picture"):
+            st.image(st.session_state.user_picture, width=72)
+        st.markdown(f"**{st.session_state.get('user_name', 'Google User')}**")
+        st.caption(st.session_state.get("user_email", st.session_state.get("username", "")))
+        st.caption("登入方式：Google OAuth")
+        if st.button("登出 Google", use_container_width=True):
+            clear_login_session()
             st.rerun()
 
         st.divider()
@@ -653,6 +1031,13 @@ else:
         temp_val = st.slider("創造力 (Temperature)", 0.0, 2.0, 0.7, step=0.1)
         top_p = st.slider("Top-p（回答多樣性）", 0.0, 1.0, 1.0, step=0.05)
         max_tokens = st.slider("最大回覆長度", 256, 4096, 1024, step=256)
+
+        st.divider()
+        st.title("🧰 工具 / MCP")
+        enable_auto_tools = st.checkbox("啟用自動工具呼叫", value=True)
+        st.caption("系統會先判斷是否需要 calculator、current_time、word_count 工具；需要時會自動透過 MCP-style tools/call 執行。")
+        with st.expander("查看 MCP tools/list"):
+            st.json(mcp_tools_list())
 
     st.title(f"🚀 {st.session_state.current_chat_id}")
 
@@ -769,7 +1154,6 @@ else:
         st.session_state.regen_flag = False
         if len(chats) >= 2 and chats[-1].get("role") == "assistant":
             prompt_to_use = chats[-2]["content"]
-            # 若上一輪使用者訊息含有附件摘要，只取真正提問文字，避免把附件摘要重複塞回去。
             if "\n\n📎 附件：" in prompt_to_use:
                 prompt_to_use = prompt_to_use.split("\n\n📎 附件：", 1)[0]
             chats.pop()
@@ -787,9 +1171,15 @@ else:
             chats = st.session_state.chats[new_n]
 
         tool_result = run_local_tool(prompt_to_use)
+        tool_prefix = "🛠️ 手動工具執行結果"
+
+        if tool_result is None and enable_auto_tools:
+            tool_result = auto_run_mcp_tool_if_needed(client, prompt_to_use)
+            tool_prefix = "🧰 自動工具 / MCP 執行結果"
+
         if tool_result is not None:
             chats.append({"role": "user", "content": prompt_to_use})
-            chats.append({"role": "assistant", "content": f"🛠️ 工具執行結果：\n\n{tool_result}"})
+            chats.append({"role": "assistant", "content": f"{tool_prefix}：\n\n{tool_result}"})
             save_user_chats(st.session_state.username, st.session_state.chats)
             st.rerun()
 
@@ -866,7 +1256,6 @@ else:
             except Exception as e:
                 full_res = f"AI 回覆失敗：{e}"
                 st.error(full_res)
-                # 如果模型呼叫失敗，不把錯誤回答存成正式 assistant 回覆。
                 st.stop()
 
             chats.append({"role": "assistant", "content": full_res})
