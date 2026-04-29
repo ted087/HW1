@@ -258,6 +258,55 @@ APP_ENCRYPTION_KEY = "貼上剛剛產生的金鑰"
     return st.session_state.get("user_groq_api_key") or stored_key
 
 
+def render_api_key_compact(username):
+    """底部彈出式 API Key 設定，不使用巢狀 expander，適合放在 popover 裡。"""
+    try:
+        stored_key = load_user_api_key(username)
+    except Exception as e:
+        stored_key = ""
+        st.error(str(e))
+        st.code(
+            "# 產生 APP_ENCRYPTION_KEY\n"
+            "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"\n\n"
+            "# .streamlit/secrets.toml\n"
+            "APP_ENCRYPTION_KEY = \"貼上剛剛產生的金鑰\""
+        )
+
+    if stored_key:
+        st.success(f"已加密儲存 Groq API Key：{mask_api_key(stored_key)}")
+    else:
+        st.warning("尚未設定 Groq API Key。請輸入自己的 API Key 才能開始聊天。")
+
+    new_key = st.text_input(
+        "Groq API Key",
+        type="password",
+        placeholder="gsk_...",
+        key="bottom_groq_api_key_input",
+        help="你的 API Key 會用 APP_ENCRYPTION_KEY 加密後，儲存在本機 user_secrets 資料夾。"
+    )
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("💾 加密儲存", key="bottom_save_api_key", use_container_width=True):
+            try:
+                save_user_api_key(username, new_key)
+                st.session_state.user_groq_api_key = new_key.strip()
+                st.success("API Key 已加密儲存！")
+                st.rerun()
+            except Exception as e:
+                st.error(f"儲存失敗：{e}")
+
+    with col_b:
+        if st.button("🧹 刪除 Key", key="bottom_delete_api_key", use_container_width=True):
+            delete_user_api_key(username)
+            if "user_groq_api_key" in st.session_state:
+                del st.session_state.user_groq_api_key
+            st.warning("已刪除儲存的 API Key。")
+            st.rerun()
+
+    return st.session_state.get("user_groq_api_key") or stored_key
+
+
 def upsert_google_user(user_info):
     """首次 Google 登入時自動建立使用者資料；之後更新最後登入時間與頭像。"""
     email = user_info.get("email", "").strip().lower()
@@ -963,8 +1012,11 @@ def auto_select_mcp_tool(client, prompt):
 {tools_prompt_text()}
 
 判斷規則：
-- 只有在使用者明確需要計算、目前時間、文字統計時才使用工具。
+- 只有在使用者明確要求「計算數學算式」、「查目前時間」、「統計字數」時才使用工具。
+- 如果使用者是在要求「寫程式、產生程式碼、debug、解釋程式、Python/C++/Java 範例」，不要使用 calculator，即使題目裡出現數字。
+- 如果使用者只是舉例輸入兩個數字、寫一個加總程式、教學或作業說明，不要使用工具。
 - 一般聊天、翻譯、寫作、程式解釋、文件分析，不要使用工具。
+- 所有中文請使用繁體中文。
 - 請只輸出 JSON，不要輸出其他文字。
 
 輸出格式：
@@ -1010,8 +1062,38 @@ def run_local_tool(prompt):
     return None
 
 
+def should_consider_auto_tool(prompt):
+    """
+    先用規則過濾，避免把「請寫程式」誤判成 calculator。
+    只有明確計算、查時間、統計字數才進入 LLM 工具路由器。
+    """
+    text = (prompt or "").lower()
+
+    block_keywords = [
+        "寫一個", "請寫", "程式", "python", "c++", "java", "javascript",
+        "debug", "除錯", "程式碼", "函式", "input", "output", "輸入", "輸出"
+    ]
+    if any(k in text for k in block_keywords):
+        if not any(k in text for k in ["幫我算", "請計算", "計算", "算出", "等於多少"]):
+            return False
+
+    time_keywords = ["現在幾點", "目前時間", "現在時間", "今天日期", "現在日期"]
+    count_keywords = ["字數", "單字數", "統計這段文字", "統計文字", "word count"]
+    calc_keywords = ["幫我算", "請計算", "計算", "算出", "等於多少", "calculate"]
+    has_math_expression = bool(re.search(r"\d\s*[+\-*/%]\s*\d", text))
+
+    return (
+        any(k in text for k in time_keywords)
+        or any(k in text for k in count_keywords)
+        or (any(k in text for k in calc_keywords) and has_math_expression)
+    )
+
+
 def auto_run_mcp_tool_if_needed(client, prompt):
     """由 LLM 自動選工具，並透過 MCP-style tools/call 執行。"""
+    if not should_consider_auto_tool(prompt):
+        return None
+
     decision = auto_select_mcp_tool(client, prompt)
     if not decision.get("use_tool"):
         return None
@@ -1024,7 +1106,6 @@ def auto_run_mcp_tool_if_needed(client, prompt):
         return f"🧰 MCP 工具呼叫失敗：\n\n工具：{tool_name}\n原因：{result.get('content')}"
 
     return (
-        "🧰 MCP 工具自動呼叫結果：\n\n"
         f"工具：{tool_name}\n\n"
         f"參數：{json.dumps(arguments, ensure_ascii=False)}\n\n"
         f"結果：{result.get('content')}"
@@ -1063,6 +1144,13 @@ if "regen_flag" not in st.session_state:
 if not st.session_state.authenticated:
     render_google_login_page()
 else:
+    if "memory" not in st.session_state:
+        st.session_state.memory = load_user_memory(st.session_state.username)
+
+    user_groq_api_key = ""
+    enable_auto_memory = True
+    enable_auto_tools = True
+
     with st.sidebar:
         st.title("👤 使用者")
         if st.session_state.get("user_picture"):
@@ -1073,16 +1161,6 @@ else:
         if st.button("登出 Google", use_container_width=True):
             clear_login_session()
             st.rerun()
-
-        user_groq_api_key = render_api_key_panel(st.session_state.username)
-
-        # 建立 Groq client：後面所有 AI 回覆、工具路由、語音轉文字都會用到 client。
-        # 如果沒有先建立 client，送出訊息時會出現 NameError: name 'client' is not defined。
-        if not user_groq_api_key:
-            st.warning("請先在左側輸入並加密儲存 Groq API Key，才能開始聊天。")
-            st.stop()
-
-        client = Groq(api_key=user_groq_api_key)
 
         st.divider()
         st.title("📚 個人知識庫")
@@ -1107,37 +1185,6 @@ else:
         )
         if st.session_state.pdf_context:
             st.caption("✅ 已啟用個人知識庫")
-
-        st.divider()
-        st.title("🧠 長期記憶")
-        if "memory" not in st.session_state:
-            st.session_state.memory = load_user_memory(st.session_state.username)
-
-        memory_profile = st.text_area(
-            "手動記憶：使用者固定資訊 / 偏好",
-            value=st.session_state.memory.get("profile", ""),
-            height=100,
-            placeholder="例如：我希望回答使用繁體中文、程式碼要加註解、回答要適合初學者。"
-        )
-        if st.button("💾 儲存手動記憶", use_container_width=True):
-            st.session_state.memory["profile"] = memory_profile
-            save_user_memory(st.session_state.username, st.session_state.memory)
-            st.success("長期記憶已儲存！")
-
-        with st.expander("查看自動記憶"):
-            st.write("偏好設定")
-            st.json(st.session_state.memory.get("preferences", []))
-            st.write("重要事項")
-            st.json(st.session_state.memory.get("important_notes", []))
-            st.write("一般自動記憶")
-            st.json(st.session_state.memory.get("auto_memories", []))
-
-        enable_auto_memory = st.checkbox("啟用自動長期記憶", value=True)
-
-        if st.button("🧹 清除長期記憶", use_container_width=True):
-            st.session_state.memory = default_memory()
-            save_user_memory(st.session_state.username, st.session_state.memory)
-            st.warning("長期記憶已清除！")
 
         st.divider()
         st.title("💬 對話管理")
@@ -1194,28 +1241,57 @@ else:
         top_p = st.slider("Top-p（回答多樣性）", 0.0, 1.0, 1.0, step=0.05)
         max_tokens = st.slider("最大回覆長度", 256, 4096, 1024, step=256)
 
+        # --- 側邊欄最下方個人設定：像 ChatGPT 帳號區，點開才顯示 ---
         st.divider()
-        st.title("🧰 工具 / MCP")
-        enable_auto_tools = st.checkbox("啟用自動工具呼叫", value=True)
-        st.caption("系統會先判斷是否需要 calculator、current_time、word_count 工具；需要時會自動透過 MCP-style tools/call 執行。")
-        with st.expander("查看 MCP tools/list"):
-            st.json(mcp_tools_list())
+        st.markdown("### 👤 個人設定")
+        with st.popover("API Key / 記憶 / MCP", use_container_width=True):
+            st.caption(f"目前登入：{st.session_state.get('user_email', st.session_state.get('username', ''))}")
+            tab_api, tab_memory, tab_tools = st.tabs(["🔐 API Key", "🧠 長期記憶", "🧰 工具 / MCP"])
+
+            with tab_api:
+                user_groq_api_key = render_api_key_compact(st.session_state.username)
+
+            with tab_memory:
+                st.write("手動記憶")
+                memory_profile = st.text_area(
+                    "使用者固定資訊 / 偏好",
+                    value=st.session_state.memory.get("profile", ""),
+                    height=100,
+                    placeholder="例如：我希望回答使用繁體中文、程式碼要加註解、回答要適合初學者。",
+                    key="sidebar_bottom_memory_profile"
+                )
+                if st.button("💾 儲存手動記憶", key="sidebar_bottom_save_memory", use_container_width=True):
+                    st.session_state.memory["profile"] = memory_profile
+                    save_user_memory(st.session_state.username, st.session_state.memory)
+                    st.success("長期記憶已儲存！")
+                    st.rerun()
+
+                st.write("自動記憶")
+                st.json({
+                    "preferences": st.session_state.memory.get("preferences", []),
+                    "important_notes": st.session_state.memory.get("important_notes", []),
+                    "auto_memories": st.session_state.memory.get("auto_memories", [])
+                })
+
+                enable_auto_memory = st.checkbox("啟用自動長期記憶", value=True, key="sidebar_bottom_enable_auto_memory")
+
+                if st.button("🧹 清除長期記憶", key="sidebar_bottom_clear_memory", use_container_width=True):
+                    st.session_state.memory = default_memory()
+                    save_user_memory(st.session_state.username, st.session_state.memory)
+                    st.warning("長期記憶已清除！")
+                    st.rerun()
+
+            with tab_tools:
+                enable_auto_tools = st.checkbox("啟用自動工具呼叫", value=True, key="sidebar_bottom_enable_auto_tools")
+                st.caption("系統會先判斷是否需要 calculator、current_time、word_count 工具；需要時會自動透過 MCP-style tools/call 執行。")
+                st.write("MCP tools/list")
+                st.json(mcp_tools_list())
 
     st.title(f"🚀 {st.session_state.current_chat_id}")
 
     st.divider()
     st.title("🧩 Multimodal 混合檔案理解")
-    uploaded_files = st.file_uploader(
-        "可同時上傳圖片、音訊、影片、PDF、文字檔 / 程式檔",
-        type=[
-            "png", "jpg", "jpeg", "webp",
-            "mp3", "wav", "m4a", "ogg", "flac",
-            "mp4", "mov", "avi", "mkv", "webm",
-            "pdf", "txt", "md", "csv", "json", "py", "cpp", "java", "html", "css", "js"
-        ],
-        accept_multiple_files=True,
-        key="mixed_files"
-    )
+    st.caption("請按下方聊天輸入框左側的「＋」上傳本次對話要分析的圖片、音訊、影片、PDF、文字檔或程式檔。")
 
     video_frame_count = st.slider(
         "影片代表影格數",
@@ -1226,17 +1302,6 @@ else:
         help="數字越高，影片畫面理解越完整，但會增加處理時間與 vision token 成本。"
     )
     st.caption("影片分析方式：系統會從影片中抽取代表影格給視覺模型分析，不是逐秒完整影片串流分析。")
-
-    if uploaded_files:
-        for f in uploaded_files:
-            if (f.type or "").startswith("image/"):
-                st.image(f, caption=f.name, use_container_width=True)
-            elif (f.type or "").startswith("audio/"):
-                st.audio(f)
-            elif (f.type or "").startswith("video/"):
-                st.video(f)
-            else:
-                st.caption(f"📎 已上傳：{f.name}")
 
     chats = st.session_state.chats[st.session_state.current_chat_id]
     for idx, m in enumerate(chats):
@@ -1311,6 +1376,8 @@ else:
             del st.session_state.last_share_url
             st.rerun()
 
+    client = Groq(api_key=user_groq_api_key) if user_groq_api_key else None
+
     # --- AI 輸入邏輯 ---
     if st.session_state.regen_flag:
         st.session_state.regen_flag = False
@@ -1319,13 +1386,40 @@ else:
             if "\n\n📎 附件：" in prompt_to_use:
                 prompt_to_use = prompt_to_use.split("\n\n📎 附件：", 1)[0]
             chats.pop()
+            uploaded_files = []
         else:
             prompt_to_use = None
+            uploaded_files = []
             st.warning("目前沒有足夠的對話可以重新生成。")
     else:
-        prompt_to_use = st.chat_input("詢問您的文件、圖片、音訊、影片或聊天...")
+        uploaded_files = []
+        prompt_payload = st.chat_input(
+            "詢問您的文件、圖片、音訊、影片或聊天...",
+            accept_file="multiple",
+            file_type=[
+                "png", "jpg", "jpeg", "webp",
+                "mp3", "wav", "m4a", "ogg", "flac",
+                "mp4", "mov", "avi", "mkv", "webm",
+                "pdf", "txt", "md", "csv", "json", "py", "cpp", "java", "html", "css", "js"
+            ]
+        )
+
+        if prompt_payload:
+            if isinstance(prompt_payload, str):
+                prompt_to_use = prompt_payload
+                uploaded_files = []
+            else:
+                prompt_to_use = getattr(prompt_payload, "text", "") or ""
+                uploaded_files = list(getattr(prompt_payload, "files", []) or [])
+        else:
+            prompt_to_use = None
+            uploaded_files = []
 
     if prompt_to_use:
+        if client is None:
+            st.warning("請先到側邊欄最下方「👤 個人設定 → API Key / 記憶 / MCP」，在 API Key 分頁輸入並加密儲存 Groq API Key，才能開始聊天。")
+            st.stop()
+
         if len(chats) == 0:
             new_n = prompt_to_use[:10] + ("..." if len(prompt_to_use) > 10 else "")
             st.session_state.chats[new_n] = st.session_state.chats.pop(st.session_state.current_chat_id)
@@ -1363,6 +1457,7 @@ else:
 
         with st.chat_message("assistant"):
             sys_msg = custom_sys
+            sys_msg += "\n\n重要：所有中文回答都必須使用繁體中文，不要使用簡體中文。"
 
             memory_prompt_text = memory_to_prompt(st.session_state.memory)
             if memory_prompt_text:
