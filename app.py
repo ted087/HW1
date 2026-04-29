@@ -1290,18 +1290,10 @@ else:
     st.title(f"🚀 {st.session_state.current_chat_id}")
 
     st.divider()
-    st.title("🧩 Multimodal 混合檔案理解")
+
     st.caption("請按下方聊天輸入框左側的「＋」上傳本次對話要分析的圖片、音訊、影片、PDF、文字檔或程式檔。")
 
-    video_frame_count = st.slider(
-        "影片代表影格數",
-        min_value=4,
-        max_value=16,
-        value=8,
-        step=2,
-        help="數字越高，影片畫面理解越完整，但會增加處理時間與 vision token 成本。"
-    )
-    st.caption("影片分析方式：系統會從影片中抽取代表影格給視覺模型分析，不是逐秒完整影片串流分析。")
+    video_frame_count = 8
 
     chats = st.session_state.chats[st.session_state.current_chat_id]
     for idx, m in enumerate(chats):
