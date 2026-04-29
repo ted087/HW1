@@ -1076,6 +1076,14 @@ else:
 
         user_groq_api_key = render_api_key_panel(st.session_state.username)
 
+        # 建立 Groq client：後面所有 AI 回覆、工具路由、語音轉文字都會用到 client。
+        # 如果沒有先建立 client，送出訊息時會出現 NameError: name 'client' is not defined。
+        if not user_groq_api_key:
+            st.warning("請先在左側輸入並加密儲存 Groq API Key，才能開始聊天。")
+            st.stop()
+
+        client = Groq(api_key=user_groq_api_key)
+
         st.divider()
         st.title("📚 個人知識庫")
         files = st.file_uploader("上傳 PDF (隔離保護)", type="pdf", accept_multiple_files=True)
